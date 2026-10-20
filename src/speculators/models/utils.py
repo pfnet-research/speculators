@@ -10,7 +10,7 @@ from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
 
 logger = logging.getLogger(__name__)
 
-# Verifier families whose final norm follows the Gemma convention
+# Verifier families whose final norm follows the offset convention
 # `x_norm * (1 + w)` instead of the plain RMSNorm `x_norm * w`. Matched
 # exactly against the verifier's effective `model_type` (after text_config
 # extraction) — gemma3n and gemma4 dropped this convention, so prefix
@@ -38,6 +38,19 @@ def _verifier_model_type(name_or_path: str) -> str | None:
     try:
         verifier_config = get_verifier_config(name_or_path)
     except (KeyError, OSError, ValueError):
+        # Unknown architectures with custom model code (such as PLaMo3) may
+        # not be registered with AutoConfig. Inspect model_type without
+        # executing remote code.
+        try:
+            config_dict, _ = PretrainedConfig.get_config_dict(name_or_path)
+            text_config = config_dict.get("text_config")
+            if isinstance(text_config, dict):
+                config_dict = text_config
+            model_type = config_dict.get("model_type")
+            if model_type:
+                return str(model_type).lower()
+        except (KeyError, OSError, ValueError):
+            pass
         logger.warning(
             "Could not resolve a config for verifier %s; assuming the plain "
             "final-norm convention (x * w).",
@@ -57,6 +70,13 @@ def uses_gemma_style_final_norm(config) -> bool:
     return model_type is not None and model_type in GEMMA_STYLE_FINAL_NORM_MODEL_TYPES
 
 
+def uses_plamo3_final_norm(config) -> bool:
+    """Whether the verifier uses PLaMo3's offset final-norm convention."""
+    verifier = getattr(getattr(config, "speculators_config", None), "verifier", None)
+    name_or_path = getattr(verifier, "name_or_path", None)
+    return bool(name_or_path) and _verifier_model_type(name_or_path) == "plamo3"
+
+
 def resolve_verifier_norm_class(config) -> type:
     """The RMSNorm class matching the verifier's final-norm weight convention.
 
@@ -65,6 +85,15 @@ def resolve_verifier_norm_class(config) -> type:
     families, `x * w` otherwise), or the reconstructed verifier targets
     are silently mis-scaled.
     """
+    if uses_plamo3_final_norm(config):
+        try:
+            from vllm.model_executor.models.plamo3 import Plamo3RMSNorm
+        except ImportError as error:
+            raise ImportError(
+                "PLaMo3 final-norm support requires a vLLM build that provides "
+                "vllm.model_executor.models.plamo3.Plamo3RMSNorm."
+            ) from error
+        return Plamo3RMSNorm
     if uses_gemma_style_final_norm(config):
         return Gemma3RMSNorm
     return Qwen3RMSNorm

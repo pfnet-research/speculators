@@ -3,7 +3,7 @@ from typing import ClassVar
 
 import torch
 from torch.nn.attention.flex_attention import create_block_mask, create_mask
-from transformers import AutoConfig, DynamicCache, PretrainedConfig
+from transformers import DynamicCache, PretrainedConfig
 
 from speculators.config import SpeculatorsConfig, VerifierConfig
 from speculators.losses import LossConfig, resolve_loss_config
@@ -21,6 +21,8 @@ from speculators.models.utils import (
     conditional_torch_compile,
     flatten_rope_parameters,
     resolve_target_layer_ids,
+    resolve_verifier_norm_class,
+    uses_plamo3_final_norm,
 )
 from speculators.proposals.greedy import GreedyTokenProposalConfig
 
@@ -116,7 +118,15 @@ class Eagle3DraftModel(DraftVocabMixin, SpeculatorModel):
         self.norm = norm_class(
             self.hidden_size, eps=config.transformer_layer_config.rms_norm_eps
         )
-        self.verifier_norm = norm_class(self.hidden_size, eps=tl_config.rms_norm_eps)
+        verifier_norm_class = resolve_verifier_norm_class(config)
+        if uses_plamo3_final_norm(config):
+            self.verifier_norm = verifier_norm_class(
+                self.hidden_size, eps=tl_config.rms_norm_eps, offset=1.0
+            )
+        else:
+            self.verifier_norm = verifier_norm_class(
+                self.hidden_size, eps=tl_config.rms_norm_eps
+            )
         self.verifier_norm.weight.requires_grad = False
 
         if config.norm_before_fc:
@@ -174,18 +184,29 @@ class Eagle3DraftModel(DraftVocabMixin, SpeculatorModel):
     def load_verifier_weights(self):
         super().load_verifier_weights()
 
+        # vLLM's PLaMo3 norm caches (weight + offset) in a buffer. Speculators
+        # loads the raw weight through load_state_dict, so refresh that buffer.
+        if uses_plamo3_final_norm(self.config):
+            self.verifier_norm.update_weight_with_offset()
+
         self.embed_tokens.weight.requires_grad_(self.config.embed_requires_grad)
 
         verifier_config = self.config.speculators_config.verifier
-        verifier_model_config = AutoConfig.from_pretrained(verifier_config.name_or_path)  # type: ignore[arg-type]
+        if verifier_config.name_or_path is None:
+            return
+        verifier_model_config, _ = PretrainedConfig.get_config_dict(
+            verifier_config.name_or_path
+        )
 
-        # For multimodal models (Qwen3VL, etc.), extract text_config
-        if hasattr(verifier_model_config, "text_config"):
-            verifier_model_config = verifier_model_config.text_config
+        # For multimodal models (Qwen3VL, etc.), extract text_config.
+        text_config = verifier_model_config.get("text_config")
+        if isinstance(text_config, dict):
+            verifier_model_config = text_config
 
-        if verifier_model_config.hidden_size != self.hidden_size:
+        verifier_hidden_size = verifier_model_config.get("hidden_size")
+        if verifier_hidden_size != self.hidden_size:
             raise ValueError(
-                f"Verifier hidden size {verifier_model_config.hidden_size} does not"
+                f"Verifier hidden size {verifier_hidden_size} does not"
                 f" match draft hidden size {self.hidden_size}."
             )
 
