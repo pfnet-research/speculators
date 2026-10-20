@@ -87,13 +87,12 @@ def resolve_verifier_norm_class(config) -> type:
     """
     if uses_plamo3_final_norm(config):
         try:
-            from vllm.model_executor.models.plamo3 import Plamo3RMSNorm
+            from vllm.model_executor.layers.layernorm import RMSNorm
         except ImportError as error:
             raise ImportError(
-                "PLaMo3 final-norm support requires a vLLM build that provides "
-                "vllm.model_executor.models.plamo3.Plamo3RMSNorm."
+                "PLaMo3 final-norm support requires vLLM's RMSNorm."
             ) from error
-        return Plamo3RMSNorm
+        return RMSNorm
     if uses_gemma_style_final_norm(config):
         return Gemma3RMSNorm
     return Qwen3RMSNorm

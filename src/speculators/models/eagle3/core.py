@@ -119,14 +119,9 @@ class Eagle3DraftModel(DraftVocabMixin, SpeculatorModel):
             self.hidden_size, eps=config.transformer_layer_config.rms_norm_eps
         )
         verifier_norm_class = resolve_verifier_norm_class(config)
-        if uses_plamo3_final_norm(config):
-            self.verifier_norm = verifier_norm_class(
-                self.hidden_size, eps=tl_config.rms_norm_eps, offset=1.0
-            )
-        else:
-            self.verifier_norm = verifier_norm_class(
-                self.hidden_size, eps=tl_config.rms_norm_eps
-            )
+        self.verifier_norm = verifier_norm_class(
+            self.hidden_size, eps=tl_config.rms_norm_eps
+        )
         self.verifier_norm.weight.requires_grad = False
 
         if config.norm_before_fc:
@@ -184,10 +179,14 @@ class Eagle3DraftModel(DraftVocabMixin, SpeculatorModel):
     def load_verifier_weights(self):
         super().load_verifier_weights()
 
-        # vLLM's PLaMo3 norm caches (weight + offset) in a buffer. Speculators
-        # loads the raw weight through load_state_dict, so refresh that buffer.
+        # The vLLM image's PLaMo3 model uses RMSNorm with this weight loader.
+        # Speculators loads verifier weights via load_state_dict, so apply the
+        # same loader to the loaded raw norm weight here.
         if uses_plamo3_final_norm(self.config):
-            self.verifier_norm.update_weight_with_offset()
+            from vllm.model_executor.models.plamo3 import rms_norm_weight_loader
+
+            raw_weight = self.verifier_norm.weight.detach().clone()
+            rms_norm_weight_loader(offset=1.0)(self.verifier_norm.weight, raw_weight)
 
         self.embed_tokens.weight.requires_grad_(self.config.embed_requires_grad)
 
