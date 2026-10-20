@@ -86,13 +86,10 @@ def resolve_verifier_norm_class(config) -> type:
     are silently mis-scaled.
     """
     if uses_plamo3_final_norm(config):
-        try:
-            from vllm.model_executor.layers.layernorm import RMSNorm
-        except ImportError as error:
-            raise ImportError(
-                "PLaMo3 final-norm support requires vLLM's RMSNorm."
-            ) from error
-        return RMSNorm
+        # vLLM's RMSNorm is a CustomOp that cannot be built outside a vLLM config
+        # context. A plain RMSNorm is equivalent: load_verifier_weights adds
+        # PLaMo3's +1.0 offset to the weight.
+        return Qwen3RMSNorm
     if uses_gemma_style_final_norm(config):
         return Gemma3RMSNorm
     return Qwen3RMSNorm
